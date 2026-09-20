@@ -13,11 +13,13 @@ local require = require(script.Parent.loader).load(script)
 
 local Maid = require("Maid")
 local Log = require("Log")
+local Promise = require("Promise")
 local Signal = require("Signal")
 local TextChatServiceConstants = require("TextChatServiceConstants")
 local TextChatSharedUtils = require("TextChatSharedUtils")
 
 type ChannelConfig = TextChatServiceConstants.ChannelConfig
+type ChannelDeliveryContext = TextChatServiceConstants.ChannelDeliveryContext
 type ChatTagConfig = TextChatServiceConstants.ChatTagConfig
 type ChatEligibilitySnapshot = TextChatServiceConstants.ChatEligibilitySnapshot
 type ChatEligibilityTrackingConfig = TextChatServiceConstants.ChatEligibilityTrackingConfig
@@ -25,6 +27,7 @@ type CommandConfig = TextChatServiceConstants.CommandConfig
 type CommandContext = TextChatServiceConstants.CommandContext
 type MessagePayload = TextChatServiceConstants.MessagePayload
 type PermissionResult = TextChatServiceConstants.PermissionResult
+type ProximityChannelConfig = TextChatServiceConstants.ProximityChannelConfig
 
 type CommandRecord = {
 	Config: CommandConfig,
@@ -116,6 +119,7 @@ function TextChatService:Init(serviceBag)
 	self._registeredTags = {} :: { [string]: ChatTagConfig }
 	self._playerTagsByUserId = {} :: { [number]: { string } }
 	self._commands = {} :: { [string]: CommandRecord }
+	self._channelDeliveryPredicates = {} :: { [string]: (ChannelDeliveryContext) -> (boolean, string?) }
 	self._chatEligibilityByViewerUserId = {} :: { [number]: ChatEligibilitySnapshot }
 	self._chatEligibilityTrackingMaid = nil
 	self._chatEligibilityTrackingConfig = nil :: ChatEligibilityTrackingConfig?
@@ -306,6 +310,17 @@ function TextChatService:CanUserChatAsync(player: Player): (boolean, string?)
 	return result == true, if result == true then nil else "User cannot chat"
 end
 
+function TextChatService:PromiseCanUserChat(player: Player)
+	return Promise.spawn(function(resolve, reject)
+		local allowed, reason = self:CanUserChatAsync(player)
+		if allowed then
+			resolve(true)
+		else
+			reject(reason or "User cannot chat")
+		end
+	end)
+end
+
 function TextChatService:CanUsersChatAsync(fromPlayer: Player, toPlayer: Player): (boolean, string?)
 	assert(typeof(fromPlayer) == "Instance" and fromPlayer:IsA("Player"), "Bad fromPlayer")
 	assert(typeof(toPlayer) == "Instance" and toPlayer:IsA("Player"), "Bad toPlayer")
@@ -319,6 +334,17 @@ function TextChatService:CanUsersChatAsync(fromPlayer: Player, toPlayer: Player)
 	end
 
 	return result == true, if result == true then nil else "Users cannot chat"
+end
+
+function TextChatService:PromiseCanUsersChat(fromPlayer: Player, toPlayer: Player)
+	return Promise.spawn(function(resolve, reject)
+		local allowed, reason = self:CanUsersChatAsync(fromPlayer, toPlayer)
+		if allowed then
+			resolve(true)
+		else
+			reject(reason or "Users cannot chat")
+		end
+	end)
 end
 
 function TextChatService:CanUsersDirectChatAsync(fromPlayer: Player, toPlayers: { Player }): { [Player]: boolean }
@@ -351,6 +377,12 @@ function TextChatService:CanUsersDirectChatAsync(fromPlayer: Player, toPlayers: 
 	end
 
 	return resultByPlayer
+end
+
+function TextChatService:PromiseCanUsersDirectChat(fromPlayer: Player, toPlayers: { Player })
+	return Promise.spawn(function(resolve)
+		resolve(self:CanUsersDirectChatAsync(fromPlayer, toPlayers))
+	end)
 end
 
 function TextChatService:StartChatEligibilityTracking(config: ChatEligibilityTrackingConfig?)
@@ -494,6 +526,93 @@ function TextChatService:RegisterChannel(config: ChannelConfig): TextChannel
 	if config.AutoJoin ~= nil then
 		channel:SetAttribute("AutoJoin", config.AutoJoin)
 	end
+	if config.ShouldDeliver ~= nil then
+		self:SetChannelDeliveryPredicate(channel.Name, config.ShouldDeliver)
+	end
+
+	return channel
+end
+
+function TextChatService:SetChannelDeliveryPredicate(
+	channelName: string,
+	shouldDeliver: ((ChannelDeliveryContext) -> (boolean, string?))?
+)
+	local channel = self:GetOrCreateChannel(channelName)
+
+	if shouldDeliver == nil then
+		self._channelDeliveryPredicates[channel.Name] = nil
+		channel.ShouldDeliverCallback = nil
+		return
+	end
+
+	self._channelDeliveryPredicates[channel.Name] = shouldDeliver
+	channel.ShouldDeliverCallback = function(message: TextChatMessage, toTextSource: TextSource): boolean
+		local predicate = self._channelDeliveryPredicates[channel.Name]
+		if predicate == nil then
+			return true
+		end
+
+		local ok, allowedOrReason, reason = pcall(predicate, {
+			Channel = channel,
+			Message = message,
+			FromPlayer = playerFromTextSource(message.TextSource),
+			FromTextSource = message.TextSource,
+			ToPlayer = playerFromTextSource(toTextSource),
+			ToTextSource = toTextSource,
+		})
+
+		if not ok then
+			Log.Warn("Channel delivery predicate failed", {
+				ChannelName = channel.Name,
+				Error = tostring(allowedOrReason),
+			})
+			return false
+		end
+
+		if allowedOrReason ~= true and reason ~= nil then
+			Log.Debug("Channel delivery predicate denied message", {
+				ChannelName = channel.Name,
+				Reason = reason,
+			})
+		end
+
+		return allowedOrReason == true
+	end
+end
+
+function TextChatService:RegisterProximityChannel(config: ProximityChannelConfig): TextChannel
+	assert(type(config) == "table", "Bad proximity channel config")
+	assert(type(config.MaxDistance) == "number" and config.MaxDistance > 0, "MaxDistance must be a positive number")
+	assert(type(config.GetPlayerPosition) == "function", "GetPlayerPosition must be a function")
+
+	local channel = self:RegisterChannel({
+		Name = config.Name,
+		DisplayName = config.DisplayName,
+		AutoJoin = config.AutoJoin,
+		Metadata = config.Metadata,
+	})
+
+	self:SetChannelDeliveryPredicate(channel.Name, function(context: ChannelDeliveryContext)
+		if config.ShouldDeliver ~= nil then
+			local allowed, reason = config.ShouldDeliver(context)
+			if not allowed then
+				return false, reason
+			end
+		end
+
+		if context.FromPlayer == nil or context.ToPlayer == nil then
+			return false, "Missing player"
+		end
+
+		local fromPosition = config.GetPlayerPosition(context.FromPlayer)
+		local toPosition = config.GetPlayerPosition(context.ToPlayer)
+		if fromPosition == nil or toPosition == nil then
+			return false, "Missing position"
+		end
+
+		local isInRange = (fromPosition - toPosition).Magnitude <= config.MaxDistance
+		return isInRange, if isInRange then nil else "Outside proximity"
+	end)
 
 	return channel
 end

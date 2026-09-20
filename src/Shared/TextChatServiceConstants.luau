@@ -19,11 +19,26 @@ export type ChatEligibilityTrackingConfig = {
 	RefreshOnPlayerAdded: boolean?,
 }
 
+export type ChannelDeliveryContext = {
+	Channel: TextChannel,
+	Message: TextChatMessage,
+	FromPlayer: Player?,
+	FromTextSource: TextSource?,
+	ToPlayer: Player?,
+	ToTextSource: TextSource,
+}
+
 export type ChannelConfig = {
 	Name: string,
 	DisplayName: string?,
 	AutoJoin: boolean?,
 	Metadata: string?,
+	ShouldDeliver: ((ChannelDeliveryContext) -> (boolean, string?))?,
+}
+
+export type ProximityChannelConfig = ChannelConfig & {
+	MaxDistance: number,
+	GetPlayerPosition: (Player) -> Vector3?,
 }
 
 export type DirectMessageConfig = {

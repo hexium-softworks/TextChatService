@@ -21,6 +21,17 @@ textChatService:RegisterChannel({
 	AutoJoin = true,
 })
 
+textChatService:RegisterProximityChannel({
+	Name = "Proximity",
+	DisplayName = "Nearby",
+	MaxDistance = 80,
+	GetPlayerPosition = function(player)
+		local character = player.Character
+		local rootPart = character and character:FindFirstChild("HumanoidRootPart")
+		return if rootPart and rootPart:IsA("BasePart") then rootPart.Position else nil
+	end,
+})
+
 textChatService:RegisterTag({
 	Name = "Developer",
 	Text = "DEV",
@@ -216,10 +227,24 @@ On the client, send through the wrapper so chat eligibility is checked before th
 message is sent:
 
 ```lua
-local ok, reason = textChatServiceClient:SendMessage("Team", "Regroup at base.")
+local ok, reason, message = textChatServiceClient:SendMessage("Team", "Regroup at base.")
 if not ok then
 	warn(reason)
 end
+```
+
+`SendMessage` returns Roblox's `TextChatMessage` as the third result when
+`TextChannel:SendAsync` succeeds. If your codebase prefers promises for yielding
+flows, use the promise variant:
+
+```lua
+textChatServiceClient:PromiseSendMessage("Team", "Regroup at base.")
+	:Then(function(message)
+		print("sent", message.MessageId)
+	end)
+	:Catch(function(reason)
+		warn(reason)
+	end)
 ```
 
 Server system messages are useful for match events, moderation notices, or
@@ -236,6 +261,53 @@ Game examples:
 - trade plaza chat with a `Trading` channel
 - raid, party, or dungeon chat created when an activity starts
 - staff-only or moderator-only channels controlled by your own server logic
+
+### Delivery Rules
+
+Channels can define a server-side `ShouldDeliver` predicate. This uses Roblox's
+`TextChannel.ShouldDeliverCallback` underneath, so it controls per-recipient
+delivery without requiring custom filtering logic in each UI.
+
+```lua
+textChatService:RegisterChannel({
+	Name = "Team",
+	DisplayName = "Team",
+	ShouldDeliver = function(context)
+		if context.FromPlayer == nil or context.ToPlayer == nil then
+			return false, "Missing player"
+		end
+
+		return getTeam(context.FromPlayer) == getTeam(context.ToPlayer), "Different team"
+	end,
+})
+```
+
+You can also change or clear delivery rules later:
+
+```lua
+textChatService:SetChannelDeliveryPredicate("Team", nil)
+```
+
+### Proximity Chat
+
+For distance-based channels, use `RegisterProximityChannel`. The wrapper stays
+game-agnostic by asking your game how to get each player's world position.
+
+```lua
+textChatService:RegisterProximityChannel({
+	Name = "Proximity",
+	DisplayName = "Nearby",
+	MaxDistance = 80,
+	GetPlayerPosition = function(player)
+		local character = player.Character
+		local rootPart = character and character:FindFirstChild("HumanoidRootPart")
+		return if rootPart and rootPart:IsA("BasePart") then rootPart.Position else nil
+	end,
+})
+```
+
+Add your own `ShouldDeliver` predicate to stack extra rules, such as party-only
+proximity or spectator exclusions.
 
 ## Direct Messages
 
@@ -267,6 +339,15 @@ This is useful for party invites, trading conversations, duel requests, support
 flows, and social menus. Use chat eligibility snapshots to decide whether to show
 or disable the button, but still let `SendDirectMessage` perform the final server
 check.
+
+Promise variants are available for UI flows that compose async steps:
+
+```lua
+textChatServiceClient:PromiseSendDirectMessage({ targetUserId }, "Want to party up?")
+	:Catch(function(reason)
+		showToast(reason)
+	end)
+```
 
 ## Chat Tags
 
@@ -318,7 +399,8 @@ list. Incoming messages are decorated with a prefix such as:
 
 Tags are sorted by priority, then by name. Missing tag definitions are ignored,
 which lets you safely remove or rename a tag definition without breaking every
-player's tag list.
+player's tag list. If a tag has a `Color`, the prefix uses Roblox rich text so
+the visible tag color matches the registered definition.
 
 Client UIs can also read and observe player tags directly:
 
@@ -443,6 +525,23 @@ textChatServiceClient.ChannelAdded:Connect(function(channelName)
 end)
 ```
 
+For game-specific presentation, add client-side decorators instead of replacing
+`TextChatService.OnIncomingMessage` yourself:
+
+```lua
+local removeDecorator = textChatServiceClient:AddIncomingMessageDecorator(function(message, properties)
+	if message.Metadata == "important" then
+		properties = properties or Instance.new("TextChatMessageProperties")
+		properties.PrefixText = "[!] " .. message.PrefixText
+	end
+
+	return properties
+end)
+
+-- Later, when this UI/controller is cleaned up:
+removeDecorator()
+```
+
 Server example:
 
 ```lua
@@ -463,6 +562,30 @@ You can build:
 - nameplates that show tags or chat availability
 - moderation dashboards that listen to messages and command usage
 
+## Promises
+
+The wrapper keeps simple tuple-returning methods for straightforward code, and
+adds Nevermore `Promise` variants for flows that need composition or cancellation
+through `Maid`.
+
+Use tuple methods when handling one action inline:
+
+```lua
+local allowed, reason = textChatServiceClient:GetCanChatWith(targetUserId)
+```
+
+Use promise methods when chaining UI work or combining multiple async checks:
+
+```lua
+textChatServiceClient:PromiseCanChatWith(targetUserId)
+	:Then(function()
+		return textChatServiceClient:PromiseSendDirectMessage({ targetUserId }, "Hello!")
+	end)
+	:Catch(function(reason)
+		showToast(reason)
+	end)
+```
+
 ## API Overview
 
 Server:
@@ -474,7 +597,12 @@ Server:
 - `StopChatEligibilityTracking()`
 - `RefreshChatEligibilitySnapshots()`
 - `GetChatEligibilitySnapshot(player)`
+- `PromiseCanUserChat(player)`
+- `PromiseCanUsersChat(fromPlayer, toPlayer)`
+- `PromiseCanUsersDirectChat(fromPlayer, toPlayers)`
 - `RegisterChannel(config)`
+- `RegisterProximityChannel(config)`
+- `SetChannelDeliveryPredicate(channelName, shouldDeliver?)`
 - `GetOrCreateChannel(name)`
 - `AddUserToChannel(player, channelName)`
 - `RemoveUserFromChannel(player, channelName)`
@@ -489,11 +617,16 @@ Client:
 - `GetChannels()`
 - `GetChannel(name)`
 - `SendMessage(channelName, text, metadata?)`
+- `PromiseSendMessage(channelName, text, metadata?)`
 - `SendDirectMessage(toUserIds, text, metadata?)`
+- `PromiseSendDirectMessage(toUserIds, text, metadata?)`
 - `GetPlayerTags(userId)`
 - `ObservePlayerTags(userId)`
+- `AddIncomingMessageDecorator(decorator)`
 - `GetCanChat()`
+- `PromiseCanChat()`
 - `GetCanChatWith(userId)`
+- `PromiseCanChatWith(userId)`
 - `GetCanChatWithCached(userId)`
 - `GetChatEligibilitySnapshot()`
 - `ObserveChatEligibility(userId)`

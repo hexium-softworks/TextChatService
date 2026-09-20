@@ -11,6 +11,8 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local require = require(script.Parent.loader).load(script)
 
 local Maid = require("Maid")
+local Log = require("Log")
+local Promise = require("Promise")
 local Signal = require("Signal")
 local TextChatServiceConstants = require("TextChatServiceConstants")
 local TextChatSharedUtils = require("TextChatSharedUtils")
@@ -35,6 +37,37 @@ local function getTextChannelsFolder(): Folder?
 	return RobloxTextChatService:FindFirstChild("TextChannels") :: Folder?
 end
 
+local function createReplaySignal<T>(getCurrentValue: () -> T)
+	local maid = Maid.new()
+	local signal = Signal.new()
+	maid:GiveTask(signal)
+
+	local replaySignal = {}
+
+	function replaySignal:Connect(callback: (T) -> ())
+		task.spawn(callback, getCurrentValue())
+		return signal:Connect(callback)
+	end
+
+	function replaySignal:Once(callback: (T) -> ())
+		task.spawn(callback, getCurrentValue())
+		return {
+			Disconnect = function() end,
+			Destroy = function() end,
+		}
+	end
+
+	function replaySignal:Wait(): T
+		return signal:Wait()
+	end
+
+	function replaySignal:Destroy()
+		maid:DoCleaning()
+	end
+
+	return replaySignal, signal, maid
+end
+
 function TextChatServiceClient:Init(serviceBag)
 	assert(not self._serviceBag, "Already initialized")
 	self._serviceBag = assert(serviceBag, "No serviceBag")
@@ -46,6 +79,8 @@ function TextChatServiceClient:Init(serviceBag)
 	self._canChatWithCache = {} :: { [number]: PermissionResult }
 	self._chatEligibilitySnapshot = {} :: ChatEligibilitySnapshot
 	self._hasChatEligibilitySnapshot = false
+	self._incomingMessageDecorators = {}
+		:: { (TextChatMessage, TextChatMessageProperties?) -> TextChatMessageProperties? }
 
 	self.MessageReceived = createSignal<MessagePayload>()
 	self.MessageSent = createSignal<MessagePayload>()
@@ -193,6 +228,23 @@ function TextChatServiceClient:_handleServerEvent(eventName: string, ...)
 end
 
 function TextChatServiceClient:_decorateIncomingMessage(message: TextChatMessage): TextChatMessageProperties?
+	local properties = self:_decorateIncomingMessageWithTags(message)
+
+	for _, decorator in self._incomingMessageDecorators do
+		local ok, nextProperties = pcall(decorator, message, properties)
+		if ok and nextProperties ~= nil then
+			properties = nextProperties
+		elseif not ok then
+			Log.Warn("Incoming message decorator failed", {
+				Error = tostring(nextProperties),
+			})
+		end
+	end
+
+	return properties
+end
+
+function TextChatServiceClient:_decorateIncomingMessageWithTags(message: TextChatMessage): TextChatMessageProperties?
 	if message.TextSource == nil then
 		return nil
 	end
@@ -211,6 +263,27 @@ function TextChatServiceClient:_decorateIncomingMessage(message: TextChatMessage
 	local properties = Instance.new("TextChatMessageProperties")
 	properties.PrefixText = prefix .. message.PrefixText
 	return properties
+end
+
+function TextChatServiceClient:AddIncomingMessageDecorator(
+	decorator: (TextChatMessage, TextChatMessageProperties?) -> TextChatMessageProperties?
+)
+	assert(type(decorator) == "function", "Bad decorator")
+
+	table.insert(self._incomingMessageDecorators, decorator)
+	local isConnected = true
+
+	return function()
+		if not isConnected then
+			return
+		end
+
+		isConnected = false
+		local index = table.find(self._incomingMessageDecorators, decorator)
+		if index ~= nil then
+			table.remove(self._incomingMessageDecorators, index)
+		end
+	end
 end
 
 function TextChatServiceClient:GetChannels(): { TextChannel }
@@ -243,7 +316,7 @@ function TextChatServiceClient:GetChannel(name: string): TextChannel?
 	return nil
 end
 
-function TextChatServiceClient:SendMessage(channelName: string, text: string, metadata: string?): (boolean, string?)
+function TextChatServiceClient:SendMessage(channelName: string, text: string, metadata: string?): (boolean, string?, TextChatMessage?)
 	assert(type(text) == "string", "Bad text")
 
 	local allowed, result = self:_invokeServer(TextChatServiceConstants.Requests.SendMessage, channelName)
@@ -259,11 +332,17 @@ function TextChatServiceClient:SendMessage(channelName: string, text: string, me
 
 	local channel = self:GetChannel(result :: string)
 	if channel == nil then
+		self.MessageFailed:Fire({
+			Text = text,
+			Metadata = metadata,
+			ChannelName = result,
+			Status = "Channel was not created",
+		})
 		return false, "Channel was not created"
 	end
 
-	local ok, err = pcall(function()
-		channel:SendAsync(text, metadata)
+	local ok, messageOrErr = pcall(function()
+		return channel:SendAsync(text, metadata)
 	end)
 
 	if not ok then
@@ -271,15 +350,30 @@ function TextChatServiceClient:SendMessage(channelName: string, text: string, me
 			Text = text,
 			Metadata = metadata,
 			ChannelName = channel.Name,
-			Status = tostring(err),
+			Status = tostring(messageOrErr),
 		})
-		return false, tostring(err)
+		return false, tostring(messageOrErr), nil
 	end
 
-	return true, nil
+	return true, nil, messageOrErr
 end
 
-function TextChatServiceClient:SendDirectMessage(toUserIds: { number }, text: string, metadata: string?): (boolean, string?)
+function TextChatServiceClient:PromiseSendMessage(channelName: string, text: string, metadata: string?)
+	return Promise.spawn(function(resolve, reject)
+		local ok, reason, message = self:SendMessage(channelName, text, metadata)
+		if ok then
+			resolve(message)
+		else
+			reject(reason or "Message failed")
+		end
+	end)
+end
+
+function TextChatServiceClient:SendDirectMessage(
+	toUserIds: { number },
+	text: string,
+	metadata: string?
+): (boolean, string?, TextChatMessage?)
 	assert(type(text) == "string", "Bad text")
 
 	local allowed, result = self:_invokeServer(TextChatServiceConstants.Requests.SendDirectMessage, toUserIds)
@@ -293,6 +387,17 @@ function TextChatServiceClient:SendDirectMessage(toUserIds: { number }, text: st
 	end
 
 	return self:SendMessage(result :: string, text, metadata)
+end
+
+function TextChatServiceClient:PromiseSendDirectMessage(toUserIds: { number }, text: string, metadata: string?)
+	return Promise.spawn(function(resolve, reject)
+		local ok, reason, message = self:SendDirectMessage(toUserIds, text, metadata)
+		if ok then
+			resolve(message)
+		else
+			reject(reason or "Direct message failed")
+		end
+	end)
 end
 
 function TextChatServiceClient:GetPlayerTags(userId: number): { string }
@@ -313,22 +418,18 @@ function TextChatServiceClient:GetPlayerTags(userId: number): { string }
 end
 
 function TextChatServiceClient:ObservePlayerTags(userId: number)
-	local signal = createSignal<{ string }>()
-	signal:Fire(self:GetPlayerTags(userId))
+	local replaySignal, signal, maid = createReplaySignal(function()
+		return self:GetPlayerTags(userId)
+	end)
+	self._maid:GiveTask(maid)
 
-	local connection = self.PlayerTagsChanged:Connect(function(changedUserId, tags)
+	maid:GiveTask(self.PlayerTagsChanged:Connect(function(changedUserId, tags)
 		if changedUserId == userId then
 			signal:Fire(tags)
 		end
-	end)
+	end))
 
-	local destroy = signal.Destroy
-	function signal:Destroy()
-		connection:Disconnect()
-		destroy(self)
-	end
-
-	return signal
+	return replaySignal
 end
 
 function TextChatServiceClient:GetCanChat(): (boolean, string?)
@@ -341,6 +442,17 @@ function TextChatServiceClient:GetCanChat(): (boolean, string?)
 	self._canChatCache = result
 	self.ChatPermissionChanged:Fire(nil, result)
 	return result.Allowed, result.Reason
+end
+
+function TextChatServiceClient:PromiseCanChat()
+	return Promise.spawn(function(resolve, reject)
+		local allowed, reason = self:GetCanChat()
+		if allowed then
+			resolve(true)
+		else
+			reject(reason or "User cannot chat")
+		end
+	end)
 end
 
 function TextChatServiceClient:GetCanChatWith(userId: number): (boolean, string?)
@@ -359,6 +471,17 @@ function TextChatServiceClient:GetCanChatWith(userId: number): (boolean, string?
 	self._canChatWithCache[userId] = result
 	self.ChatPermissionChanged:Fire(userId, result)
 	return result.Allowed, result.Reason
+end
+
+function TextChatServiceClient:PromiseCanChatWith(userId: number)
+	return Promise.spawn(function(resolve, reject)
+		local allowed, reason = self:GetCanChatWith(userId)
+		if allowed then
+			resolve(true)
+		else
+			reject(reason or "Users cannot chat")
+		end
+	end)
 end
 
 function TextChatServiceClient:GetCanChatWithCached(userId: number): (boolean?, string?)
@@ -380,26 +503,22 @@ function TextChatServiceClient:GetChatEligibilitySnapshot(): ChatEligibilitySnap
 end
 
 function TextChatServiceClient:ObserveChatEligibility(userId: number)
-	local signal = createSignal<PermissionResult?>()
-	local current = self._chatEligibilitySnapshot[userId] or self._canChatWithCache[userId]
-	signal:Fire(if current ~= nil then {
-		Allowed = current.Allowed,
-		Reason = current.Reason,
-	} else nil)
+	local replaySignal, signal, maid = createReplaySignal(function()
+		local current = self._chatEligibilitySnapshot[userId] or self._canChatWithCache[userId]
+		return if current ~= nil then {
+			Allowed = current.Allowed,
+			Reason = current.Reason,
+		} else nil
+	end)
+	self._maid:GiveTask(maid)
 
-	local connection = self.ChatPermissionChanged:Connect(function(changedUserId, result)
+	maid:GiveTask(self.ChatPermissionChanged:Connect(function(changedUserId, result)
 		if changedUserId == userId then
 			signal:Fire(result)
 		end
-	end)
+	end))
 
-	local destroy = signal.Destroy
-	function signal:Destroy()
-		connection:Disconnect()
-		destroy(self)
-	end
-
-	return signal
+	return replaySignal
 end
 
 function TextChatServiceClient:_setChatEligibilitySnapshot(snapshot: ChatEligibilitySnapshot)

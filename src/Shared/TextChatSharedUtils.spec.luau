@@ -69,6 +69,20 @@ return function()
 			expect(#tags).toBe(0)
 			expect(TextChatSharedUtils.formatTagPrefix(tags)).toBe("")
 		end)
+
+		it("formats colored tags as rich text", function()
+			local tags = TextChatSharedUtils.resolveTags({ "Developer" }, {
+				Developer = {
+					Name = "Developer",
+					Text = "<DEV>",
+					Color = Color3.fromRGB(90, 180, 255),
+				},
+			})
+
+			expect(TextChatSharedUtils.formatTagPrefix(tags)).toBe(
+				'<font color="#5AB4FF">[&lt;DEV&gt;]</font> '
+			)
+		end)
 	end)
 
 	describe("parseCommandArguments", function()

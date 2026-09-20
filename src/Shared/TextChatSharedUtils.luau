@@ -28,6 +28,24 @@ export type ResolvedChatTag = {
 
 local CHANNEL_NAME_PATTERN = "[^%w_%-%.]"
 
+local function escapeRichText(value: string): string
+	value = string.gsub(value, "&", "&amp;")
+	value = string.gsub(value, "<", "&lt;")
+	value = string.gsub(value, ">", "&gt;")
+	value = string.gsub(value, "\"", "&quot;")
+	value = string.gsub(value, "'", "&apos;")
+	return value
+end
+
+local function colorToHex(color: Color3): string
+	return string.format(
+		"#%02X%02X%02X",
+		math.clamp(math.round(color.R * 255), 0, 255),
+		math.clamp(math.round(color.G * 255), 0, 255),
+		math.clamp(math.round(color.B * 255), 0, 255)
+	)
+end
+
 function TextChatSharedUtils.normalizePermissionResult(allowed: boolean?, reason: string?): PermissionResult
 	return {
 		Allowed = allowed == true,
@@ -97,7 +115,12 @@ function TextChatSharedUtils.formatTagPrefix(tags: { ResolvedChatTag }): string
 
 	local parts = table.create(#tags)
 	for index, tag in tags do
-		parts[index] = `[{tag.Text}]`
+		local text = `[{escapeRichText(tag.Text)}]`
+		if tag.Color ~= nil then
+			parts[index] = `<font color="{colorToHex(tag.Color)}">{text}</font>`
+		else
+			parts[index] = text
+		end
 	end
 
 	return table.concat(parts, " ") .. " "
