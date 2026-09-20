@@ -1,5 +1,5 @@
 {
-  "name": "Log",
+  "name": "TextChatService",
   "globIgnorePaths": [
     "**/.package-lock.json",
     "**/.pnpm",

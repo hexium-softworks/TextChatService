@@ -2,5 +2,15 @@ packages:
   - .
 
 allowBuilds:
+  '@hexium-softworks/log': true
+  '@quenty/deferred': true
   '@quenty/loader': true
+  '@quenty/maid': true
+  '@quenty/math': true
   '@quenty/nevermore-test-runner': true
+  '@quenty/promise': true
+  '@quenty/signal': true
+  '@quenty/table': true
+
+minimumReleaseAgeExclude:
+  - '@hexium-softworks/log@1.0.1'

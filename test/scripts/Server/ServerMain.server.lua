@@ -3,7 +3,7 @@
 ]]
 local ServerScriptService = game:GetService("ServerScriptService")
 
-local root = ServerScriptService.Log
+local root = ServerScriptService.TextChatService
 local loader = root:FindFirstChild("LoaderUtils", true).Parent
 local require = require(loader).bootstrapGame(root)
 

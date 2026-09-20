@@ -1,20 +1,21 @@
 {
-  "name": "@hexium-softworks/log",
-  "version": "1.0.1",
-  "description": "A game-agnostic logging package with global loggers, minimum levels, structured context, and sink-based output for NevermoreEngine projects.",
+  "name": "@hexium-softworks/textchatservice",
+  "version": "1.0.0",
+  "description": "A game-agnostic, server-first TextChatService wrapper for NevermoreEngine projects.",
   "keywords": [
     "Roblox",
     "Nevermore",
     "Luau",
-    "logging",
-    "logger",
-    "log"
+    "chat",
+    "TextChatService",
+    "commands",
+    "chat-tags"
   ],
   "license": "MIT",
   "packageManager": "pnpm@12.4.2",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/hexium-softworks/log.git"
+    "url": "git+https://github.com/hexium-softworks/text-chat-service.git"
   },
   "files": [
     "src",
@@ -25,7 +26,12 @@
     "HexedEthan"
   ],
   "dependencies": {
-    "@quenty/loader": "10.11.0"
+    "@hexium-softworks/log": "^1.0.1",
+    "@quenty/loader": "10.11.0",
+    "@quenty/maid": "^3.12.0",
+    "@quenty/promise": "^10.24.0",
+    "@quenty/signal": "^7.13.2",
+    "@quenty/table": "^3.9.2"
   },
   "devDependencies": {
     "@quenty/nevermore-test-runner": "1.4.0",

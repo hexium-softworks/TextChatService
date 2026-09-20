@@ -1,92 +1,93 @@
-# Log
+# TextChatService
 
-A small, game-agnostic Luau logging package for Nevermore-style Roblox projects.
+A game-agnostic, server-first wrapper around Roblox `TextChatService` for NevermoreEngine projects.
 
-Log keeps the default global logger simple while exposing sink-based output for runtime debug consoles, custom telemetry, or test capture.
+The package keeps Roblox's native chat primitives underneath while adding a small service API for channel setup, chat eligibility, direct-message setup, tags, commands, and custom UI signals.
 
 ## Installation
 
 ```sh
-npm install @hexium-softworks/log
+npm install @hexium-softworks/textchatservice
 ```
 
-## Global Logger
+## Server Usage
 
 ```lua
-local Log = require("Log")
+local textChatService = serviceBag:GetService(require("TextChatService"))
 
-Log.Info("Round started", {
-	RoundId = 12,
+textChatService:RegisterChannel({
+	Name = "Global",
+	DisplayName = "Global",
+	AutoJoin = true,
 })
 
-Log.Warn("Optional asset missing", {
-	AssetName = "VictoryFanfare",
-})
-```
-
-By default, the Roblox adapter writes through `LogService`.
-
-## Custom Loggers
-
-```lua
-local MatchLog = Log.new({
-	name = "MatchService",
-	defaultContext = {
-		Service = "MatchService",
-	},
-	minLevel = "Debug",
+textChatService:RegisterTag({
+	Name = "Developer",
+	Text = "DEV",
+	Color = Color3.fromRGB(90, 180, 255),
+	Priority = 100,
 })
 
-local RoundLog = MatchLog:WithContext({
-	RoundId = 12,
-})
-
-RoundLog.Debug("Assigned teams")
-RoundLog.Info("Round started")
-```
-
-## Minimum Levels
-
-```lua
-Log.SetGlobalMinLevel("Warn")
-
-local VerboseLog = Log.new({
-	minLevel = "Verbose",
-})
-```
-
-Logger-level minimums override the global minimum. Sink-level minimums are applied after the logger/global filter.
-
-## Sinks
-
-Sinks receive structured log entries and can choose their own minimum level.
-
-```lua
-local consoleEntries = {}
-
-Log.AddSink({
-	Name = "RuntimeDebugConsole",
-	MinLevel = "Verbose",
-	Write = function(entry)
-		table.insert(consoleEntries, entry)
+textChatService:RegisterCommand({
+	Name = "Wave",
+	PrimaryAlias = "/wave",
+	Run = function(context)
+		textChatService:SendSystemMessage("Global", `{context.Player.DisplayName} waves.`)
 	end,
 })
-
-Log.Log("Debug", "Inventory changed", {
-	Player = "HexedEthan",
-})
 ```
 
-Each entry includes:
+## Client Usage
 
 ```lua
-{
-	Level = "Info",
-	Message = "Round started",
-	Context = {},
-	Timestamp = 123.456,
-	Source = "MatchService",
-	Function = "startRound",
-	LoggerName = "MatchService",
-}
+local textChatServiceClient = serviceBag:GetService(require("TextChatServiceClient"))
+
+local canChat = textChatServiceClient:GetCanChat()
+if canChat then
+	textChatServiceClient:SendMessage("Global", "Hello world!")
+end
+
+textChatServiceClient.MessageReceived:Connect(function(message)
+	print(message.ChannelName, message.UserId, message.Text)
+end)
 ```
+
+## API Overview
+
+Server:
+
+- `CanUserChatAsync(player)`
+- `CanUsersChatAsync(fromPlayer, toPlayer)`
+- `CanUsersDirectChatAsync(fromPlayer, toPlayers)`
+- `RegisterChannel(config)`
+- `GetOrCreateChannel(name)`
+- `AddUserToChannel(player, channelName)`
+- `RemoveUserFromChannel(player, channelName)`
+- `SendSystemMessage(channelName, message, metadata?)`
+- `RegisterTag(tagConfig)`
+- `SetPlayerTags(player, tags)`
+- `RegisterCommand(commandConfig)`
+- `UnregisterCommand(commandName)`
+
+Client:
+
+- `GetChannels()`
+- `GetChannel(name)`
+- `SendMessage(channelName, text, metadata?)`
+- `SendDirectMessage(toUserIds, text, metadata?)`
+- `GetPlayerTags(userId)`
+- `ObservePlayerTags(userId)`
+- `GetCanChat()`
+- `GetCanChatWith(userId)`
+
+Signals:
+
+- `MessageReceived`
+- `MessageSent`
+- `MessageFailed`
+- `SystemMessageReceived`
+- `ChannelAdded`
+- `ChannelRemoved`
+- `PlayerTagsChanged`
+- `CommandExecuted`
+- `ChatPermissionChanged`
