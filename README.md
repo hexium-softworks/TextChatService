@@ -4,6 +4,8 @@ A game-agnostic, server-first wrapper around Roblox `TextChatService` for Neverm
 
 The package keeps Roblox's native chat primitives underneath while adding a small service API for channel setup, chat eligibility, direct-message setup, tags, commands, and custom UI signals.
 
+Networking is handled through Nevermore's `Remoting` package, so the service uses named remote methods and events instead of manually managing `RemoteFunction` and `RemoteEvent` instances.
+
 ## Installation
 
 ```sh

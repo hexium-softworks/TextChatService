@@ -3,14 +3,37 @@ packages:
 
 allowBuilds:
   '@hexium-softworks/log': true
+  '@quenty/baseobject': true
+  '@quenty/bindable-utils': true
+  '@quenty/brio': true
+  '@quenty/cancellabledelay': true
+  '@quenty/canceltoken': true
   '@quenty/deferred': true
+  '@quenty/ducktype': true
+  '@quenty/enums': true
+  '@quenty/enumutils': true
+  '@quenty/instance-path': true
+  '@quenty/instanceutils': true
+  '@quenty/jestutils': true
   '@quenty/loader': true
+  '@quenty/lrucache': true
   '@quenty/maid': true
   '@quenty/math': true
   '@quenty/nevermore-test-runner': true
+  '@quenty/playermock': true
   '@quenty/promise': true
+  '@quenty/promisemaid': true
+  '@quenty/remotefunctionutils': true
+  '@quenty/remoting': true
+  '@quenty/rx': true
+  '@quenty/servicebag': true
   '@quenty/signal': true
+  '@quenty/steputils': true
+  '@quenty/symbol': true
   '@quenty/table': true
+  '@quenty/throttle': true
+  '@quenty/tuple': true
+  '@quenty/typeutils': true
 
 minimumReleaseAgeExclude:
   - '@hexium-softworks/log@1.0.1'

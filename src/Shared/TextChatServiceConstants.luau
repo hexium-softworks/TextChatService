@@ -81,9 +81,7 @@ export type MessagePayload = {
 }
 
 export type TextChatServiceConstants = {
-	RemoteFolderName: string,
-	RequestRemoteName: string,
-	EventRemoteName: string,
+	RemotingName: string,
 	TagSnapshotEvent: string,
 	EventNames: {
 		MessageReceived: string,
@@ -110,9 +108,7 @@ export type TextChatServiceConstants = {
 }
 
 local constants = {
-	RemoteFolderName = "NevermoreTextChatService",
-	RequestRemoteName = "TextChatServiceRequest",
-	EventRemoteName = "TextChatServiceEvent",
+	RemotingName = "NevermoreTextChatService",
 	TagSnapshotEvent = "TagSnapshot",
 
 	EventNames = Table.readonly({

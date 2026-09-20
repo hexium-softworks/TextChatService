@@ -1,6 +1,6 @@
 {
   "name": "@hexium-softworks/textchatservice",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "A game-agnostic, server-first TextChatService wrapper for NevermoreEngine projects.",
   "keywords": [
     "Roblox",
@@ -30,6 +30,7 @@
     "@quenty/loader": "10.11.0",
     "@quenty/maid": "^3.12.0",
     "@quenty/promise": "^10.24.0",
+    "@quenty/remoting": "^12.44.1",
     "@quenty/signal": "^7.13.2",
     "@quenty/table": "^3.9.2"
   },

@@ -14,6 +14,7 @@ local require = require(script.Parent.loader).load(script)
 local Maid = require("Maid")
 local Log = require("Log")
 local Promise = require("Promise")
+local Remoting = require("Remoting")
 local Signal = require("Signal")
 local TextChatServiceConstants = require("TextChatServiceConstants")
 local TextChatSharedUtils = require("TextChatSharedUtils")
@@ -40,45 +41,6 @@ TextChatService.ServiceName = "TextChatService"
 
 local function createSignal<T...>()
 	return Signal.new() :: Signal.Signal<T...>
-end
-
-local function getOrCreateFolder(parent: Instance, name: string): Folder
-	local existing = parent:FindFirstChild(name)
-	if existing then
-		assert(existing:IsA("Folder"), `{name} must be a Folder`)
-		return existing
-	end
-
-	local folder = Instance.new("Folder")
-	folder.Name = name
-	folder.Parent = parent
-	return folder
-end
-
-local function getOrCreateRemoteFunction(parent: Instance, name: string): RemoteFunction
-	local existing = parent:FindFirstChild(name)
-	if existing then
-		assert(existing:IsA("RemoteFunction"), `{name} must be a RemoteFunction`)
-		return existing
-	end
-
-	local remote = Instance.new("RemoteFunction")
-	remote.Name = name
-	remote.Parent = parent
-	return remote
-end
-
-local function getOrCreateRemoteEvent(parent: Instance, name: string): RemoteEvent
-	local existing = parent:FindFirstChild(name)
-	if existing then
-		assert(existing:IsA("RemoteEvent"), `{name} must be a RemoteEvent`)
-		return existing
-	end
-
-	local remote = Instance.new("RemoteEvent")
-	remote.Name = name
-	remote.Parent = parent
-	return remote
 end
 
 local function getTextChannelsFolder(): Folder
@@ -123,6 +85,7 @@ function TextChatService:Init(serviceBag)
 	self._chatEligibilityByViewerUserId = {} :: { [number]: ChatEligibilitySnapshot }
 	self._chatEligibilityTrackingMaid = nil
 	self._chatEligibilityTrackingConfig = nil :: ChatEligibilityTrackingConfig?
+	self._remoting = Remoting.Server.new(ReplicatedStorage, TextChatServiceConstants.RemotingName)
 
 	self.MessageReceived = createSignal<MessagePayload>()
 	self.MessageSent = createSignal<MessagePayload>()
@@ -145,10 +108,11 @@ function TextChatService:Init(serviceBag)
 	self._maid:GiveTask(self.CommandExecuted)
 	self._maid:GiveTask(self.ChatPermissionChanged)
 	self._maid:GiveTask(self.ChatEligibilitySnapshotChanged)
+	self._maid:GiveTask(self._remoting)
 end
 
 function TextChatService:Start()
-	self:_setupRemotes()
+	self:_setupRemoting()
 	self:_connectTextChatSignals()
 
 	self._maid:GiveTask(Players.PlayerRemoving:Connect(function(player)
@@ -158,15 +122,46 @@ function TextChatService:Start()
 	end))
 end
 
-function TextChatService:_setupRemotes()
-	local folder = getOrCreateFolder(ReplicatedStorage, TextChatServiceConstants.RemoteFolderName)
-	self._remoteFolder = folder
-	self._requestRemote = getOrCreateRemoteFunction(folder, TextChatServiceConstants.RequestRemoteName)
-	self._eventRemote = getOrCreateRemoteEvent(folder, TextChatServiceConstants.EventRemoteName)
+function TextChatService:_setupRemoting()
+	local requests = TextChatServiceConstants.Requests
+	local events = TextChatServiceConstants.EventNames
 
-	self._requestRemote.OnServerInvoke = function(player, requestName: string, ...)
-		return self:_handleClientRequest(player, requestName, ...)
+	for _, eventName in events do
+		self._remoting:DeclareEvent(eventName)
 	end
+	self._remoting:DeclareEvent(TextChatServiceConstants.TagSnapshotEvent)
+
+	self._maid:GiveTask(self._remoting:Bind(requests.GetCanChat, function(player)
+		return self:CanUserChatAsync(player)
+	end))
+
+	self._maid:GiveTask(self._remoting:Bind(requests.GetCanChatWith, function(player, targetUserId)
+		return self:_canChatWithUserIdAsync(player, targetUserId)
+	end))
+
+	self._maid:GiveTask(self._remoting:Bind(requests.GetChatEligibilitySnapshot, function(player)
+		return self:GetChatEligibilitySnapshot(player)
+	end))
+
+	self._maid:GiveTask(self._remoting:Bind(requests.SendMessage, function(player, channelName)
+		return self:_prepareClientMessageAsync(player, channelName)
+	end))
+
+	self._maid:GiveTask(self._remoting:Bind(requests.SendDirectMessage, function(player, toUserIds)
+		return self:_prepareDirectMessageAsync(player, toUserIds)
+	end))
+
+	self._maid:GiveTask(self._remoting:Bind(requests.GetPlayerTags, function(_player, userId)
+		return self:GetPlayerTagsByUserId(userId)
+	end))
+
+	self._maid:GiveTask(self._remoting:Bind(requests.GetAllPlayerTags, function(_player)
+		return table.clone(self._playerTagsByUserId)
+	end))
+
+	self._maid:GiveTask(self._remoting:Bind(requests.GetRegisteredTags, function(_player)
+		return table.clone(self._registeredTags)
+	end))
 end
 
 function TextChatService:_connectTextChatSignals()
@@ -188,47 +183,11 @@ function TextChatService:_messageToPayload(message: TextChatMessage): MessagePay
 end
 
 function TextChatService:_fireClientEventAll(eventName: string, ...)
-	if self._eventRemote == nil then
-		return
-	end
-
-	self._eventRemote:FireAllClients(eventName, ...)
+	self._remoting:FireAllClients(eventName, ...)
 end
 
 function TextChatService:_fireClientEvent(player: Player, eventName: string, ...)
-	if self._eventRemote == nil then
-		return
-	end
-
-	self._eventRemote:FireClient(player, eventName, ...)
-end
-
-function TextChatService:_handleClientRequest(player: Player, requestName: string, ...)
-	local requests = TextChatServiceConstants.Requests
-
-	if requestName == requests.GetCanChat then
-		return self:CanUserChatAsync(player)
-	elseif requestName == requests.GetCanChatWith then
-		local targetUserId = ...
-		return self:_canChatWithUserIdAsync(player, targetUserId)
-	elseif requestName == requests.GetChatEligibilitySnapshot then
-		return self:GetChatEligibilitySnapshot(player)
-	elseif requestName == requests.SendMessage then
-		local channelName = ...
-		return self:_prepareClientMessageAsync(player, channelName)
-	elseif requestName == requests.SendDirectMessage then
-		local toUserIds = ...
-		return self:_prepareDirectMessageAsync(player, toUserIds)
-	elseif requestName == requests.GetPlayerTags then
-		local userId = ...
-		return self:GetPlayerTagsByUserId(userId)
-	elseif requestName == requests.GetAllPlayerTags then
-		return table.clone(self._playerTagsByUserId)
-	elseif requestName == requests.GetRegisteredTags then
-		return table.clone(self._registeredTags)
-	else
-		return false, `Unknown request {tostring(requestName)}`
-	end
+	self._remoting:FireClient(eventName, player, ...)
 end
 
 function TextChatService:_prepareClientMessageAsync(player: Player, channelName: string)
@@ -798,10 +757,6 @@ function TextChatService:_handleCommandTriggered(record: CommandRecord, originTe
 end
 
 function TextChatService:Destroy()
-	if self._requestRemote ~= nil then
-		self._requestRemote.OnServerInvoke = nil
-	end
-
 	for commandName in self._commands do
 		self:UnregisterCommand(commandName)
 	end

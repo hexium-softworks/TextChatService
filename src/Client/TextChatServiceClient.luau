@@ -13,6 +13,7 @@ local require = require(script.Parent.loader).load(script)
 local Maid = require("Maid")
 local Log = require("Log")
 local Promise = require("Promise")
+local Remoting = require("Remoting")
 local Signal = require("Signal")
 local TextChatServiceConstants = require("TextChatServiceConstants")
 local TextChatSharedUtils = require("TextChatSharedUtils")
@@ -27,10 +28,6 @@ TextChatServiceClient.ServiceName = "TextChatServiceClient"
 
 local function createSignal<T...>()
 	return Signal.new() :: Signal.Signal<T...>
-end
-
-local function waitForRemoteFolder(): Folder
-	return ReplicatedStorage:WaitForChild(TextChatServiceConstants.RemoteFolderName) :: Folder
 end
 
 local function getTextChannelsFolder(): Folder?
@@ -81,6 +78,7 @@ function TextChatServiceClient:Init(serviceBag)
 	self._hasChatEligibilitySnapshot = false
 	self._incomingMessageDecorators = {}
 		:: { (TextChatMessage, TextChatMessageProperties?) -> TextChatMessageProperties? }
+	self._remoting = Remoting.Client.new(ReplicatedStorage, TextChatServiceConstants.RemotingName)
 
 	self.MessageReceived = createSignal<MessagePayload>()
 	self.MessageSent = createSignal<MessagePayload>()
@@ -101,21 +99,50 @@ function TextChatServiceClient:Init(serviceBag)
 	self._maid:GiveTask(self.PlayerTagsChanged)
 	self._maid:GiveTask(self.CommandExecuted)
 	self._maid:GiveTask(self.ChatPermissionChanged)
+	self._maid:GiveTask(self._remoting)
 end
 
 function TextChatServiceClient:Start()
-	self:_setupRemotes()
+	self:_setupRemoting()
 	self:_connectTextChatSignals()
 	self:_syncInitialState()
 end
 
-function TextChatServiceClient:_setupRemotes()
-	local folder = waitForRemoteFolder()
-	self._requestRemote = folder:WaitForChild(TextChatServiceConstants.RequestRemoteName) :: RemoteFunction
-	self._eventRemote = folder:WaitForChild(TextChatServiceConstants.EventRemoteName) :: RemoteEvent
+function TextChatServiceClient:_setupRemoting()
+	local events = TextChatServiceConstants.EventNames
 
-	self._maid:GiveTask(self._eventRemote.OnClientEvent:Connect(function(eventName: string, ...)
-		self:_handleServerEvent(eventName, ...)
+	self._maid:GiveTask(self._remoting:Connect(TextChatServiceConstants.TagSnapshotEvent, function(...)
+		self:_handleTagSnapshot(...)
+	end))
+	self._maid:GiveTask(self._remoting:Connect(events.MessageReceived, function(...)
+		self.MessageReceived:Fire(...)
+	end))
+	self._maid:GiveTask(self._remoting:Connect(events.MessageSent, function(...)
+		self.MessageSent:Fire(...)
+	end))
+	self._maid:GiveTask(self._remoting:Connect(events.MessageFailed, function(...)
+		self.MessageFailed:Fire(...)
+	end))
+	self._maid:GiveTask(self._remoting:Connect(events.SystemMessageReceived, function(...)
+		self.SystemMessageReceived:Fire(...)
+	end))
+	self._maid:GiveTask(self._remoting:Connect(events.ChannelAdded, function(...)
+		self.ChannelAdded:Fire(...)
+	end))
+	self._maid:GiveTask(self._remoting:Connect(events.ChannelRemoved, function(...)
+		self.ChannelRemoved:Fire(...)
+	end))
+	self._maid:GiveTask(self._remoting:Connect(events.PlayerTagsChanged, function(...)
+		self:_handlePlayerTagsChanged(...)
+	end))
+	self._maid:GiveTask(self._remoting:Connect(events.CommandExecuted, function(...)
+		self.CommandExecuted:Fire(...)
+	end))
+	self._maid:GiveTask(self._remoting:Connect(events.ChatPermissionChanged, function(...)
+		self:_handleChatPermissionChanged(...)
+	end))
+	self._maid:GiveTask(self._remoting:Connect(events.ChatEligibilitySnapshot, function(...)
+		self:_handleChatEligibilitySnapshot(...)
 	end))
 end
 
@@ -144,21 +171,21 @@ end
 
 function TextChatServiceClient:_syncInitialState()
 	local okTags, registeredTags = pcall(function()
-		return self._requestRemote:InvokeServer(TextChatServiceConstants.Requests.GetRegisteredTags)
+		return self._remoting:InvokeServer(TextChatServiceConstants.Requests.GetRegisteredTags)
 	end)
 	if okTags and typeof(registeredTags) == "table" then
 		self._registeredTags = registeredTags
 	end
 
 	local okPlayerTags, playerTags = pcall(function()
-		return self._requestRemote:InvokeServer(TextChatServiceConstants.Requests.GetAllPlayerTags)
+		return self._remoting:InvokeServer(TextChatServiceConstants.Requests.GetAllPlayerTags)
 	end)
 	if okPlayerTags and typeof(playerTags) == "table" then
 		self._playerTagsByUserId = playerTags
 	end
 
 	local okEligibility, eligibilitySnapshot = pcall(function()
-		return self._requestRemote:InvokeServer(TextChatServiceConstants.Requests.GetChatEligibilitySnapshot)
+		return self._remoting:InvokeServer(TextChatServiceConstants.Requests.GetChatEligibilitySnapshot)
 	end)
 	if okEligibility and typeof(eligibilitySnapshot) == "table" then
 		self:_setChatEligibilitySnapshot(eligibilitySnapshot)
@@ -176,54 +203,38 @@ function TextChatServiceClient:_messageToPayload(message: TextChatMessage): Mess
 	}
 end
 
-function TextChatServiceClient:_handleServerEvent(eventName: string, ...)
-	local events = TextChatServiceConstants.EventNames
+function TextChatServiceClient:_handleTagSnapshot(registeredTags: any, playerTagsByUserId: any)
+	if typeof(registeredTags) == "table" then
+		self._registeredTags = registeredTags
+	end
+	if typeof(playerTagsByUserId) == "table" then
+		self._playerTagsByUserId = playerTagsByUserId
+	end
+end
 
-	if eventName == TextChatServiceConstants.TagSnapshotEvent then
-		local registeredTags, playerTagsByUserId = ...
-		if typeof(registeredTags) == "table" then
-			self._registeredTags = registeredTags
+function TextChatServiceClient:_handlePlayerTagsChanged(userId: any, tags: any)
+	if type(userId) == "number" and typeof(tags) == "table" then
+		self._playerTagsByUserId[userId] = tags
+		self.PlayerTagsChanged:Fire(userId, table.clone(tags))
+	end
+end
+
+function TextChatServiceClient:_handleChatPermissionChanged(userId: any, result: any)
+	if type(userId) == "number" and typeof(result) == "table" then
+		local normalized = TextChatSharedUtils.normalizePermissionResult(result.Allowed, result.Reason)
+		self._canChatWithCache[userId] = normalized
+		if self._hasChatEligibilitySnapshot then
+			self._chatEligibilitySnapshot[userId] = normalized
 		end
-		if typeof(playerTagsByUserId) == "table" then
-			self._playerTagsByUserId = playerTagsByUserId
-		end
-	elseif eventName == events.MessageReceived then
-		self.MessageReceived:Fire(...)
-	elseif eventName == events.MessageSent then
-		self.MessageSent:Fire(...)
-	elseif eventName == events.MessageFailed then
-		self.MessageFailed:Fire(...)
-	elseif eventName == events.SystemMessageReceived then
-		self.SystemMessageReceived:Fire(...)
-	elseif eventName == events.ChannelAdded then
-		self.ChannelAdded:Fire(...)
-	elseif eventName == events.ChannelRemoved then
-		self.ChannelRemoved:Fire(...)
-	elseif eventName == events.PlayerTagsChanged then
-		local userId, tags = ...
-		if type(userId) == "number" and typeof(tags) == "table" then
-			self._playerTagsByUserId[userId] = tags
-			self.PlayerTagsChanged:Fire(userId, table.clone(tags))
-		end
-	elseif eventName == events.CommandExecuted then
-		self.CommandExecuted:Fire(...)
-	elseif eventName == events.ChatPermissionChanged then
-		local userId, result = ...
-		if type(userId) == "number" and typeof(result) == "table" then
-			local normalized = TextChatSharedUtils.normalizePermissionResult(result.Allowed, result.Reason)
-			self._canChatWithCache[userId] = normalized
-			if self._hasChatEligibilitySnapshot then
-				self._chatEligibilitySnapshot[userId] = normalized
-			end
-			self.ChatPermissionChanged:Fire(userId, normalized)
-		else
-			self.ChatPermissionChanged:Fire(...)
-		end
-	elseif eventName == events.ChatEligibilitySnapshot then
-		local snapshot = ...
-		if typeof(snapshot) == "table" then
-			self:_setChatEligibilitySnapshot(snapshot)
-		end
+		self.ChatPermissionChanged:Fire(userId, normalized)
+	else
+		self.ChatPermissionChanged:Fire(userId, result)
+	end
+end
+
+function TextChatServiceClient:_handleChatEligibilitySnapshot(snapshot: any)
+	if typeof(snapshot) == "table" then
+		self:_setChatEligibilitySnapshot(snapshot)
 	end
 end
 
@@ -407,7 +418,7 @@ function TextChatServiceClient:GetPlayerTags(userId: number): { string }
 	end
 
 	local ok, result = pcall(function()
-		return self._requestRemote:InvokeServer(TextChatServiceConstants.Requests.GetPlayerTags, userId)
+		return self._remoting:InvokeServer(TextChatServiceConstants.Requests.GetPlayerTags, userId)
 	end)
 	if ok and typeof(result) == "table" then
 		self._playerTagsByUserId[userId] = result
@@ -560,7 +571,7 @@ end
 
 function TextChatServiceClient:_invokeServer(requestName: string, ...): (boolean, string?)
 	local ok, result, reason = pcall(function(...)
-		return self._requestRemote:InvokeServer(requestName, ...)
+		return self._remoting:InvokeServer(requestName, ...)
 	end, ...)
 
 	if not ok then
