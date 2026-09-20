@@ -19,6 +19,8 @@ local TextChatSharedUtils = require("TextChatSharedUtils")
 
 type ChannelConfig = TextChatServiceConstants.ChannelConfig
 type ChatTagConfig = TextChatServiceConstants.ChatTagConfig
+type ChatEligibilitySnapshot = TextChatServiceConstants.ChatEligibilitySnapshot
+type ChatEligibilityTrackingConfig = TextChatServiceConstants.ChatEligibilityTrackingConfig
 type CommandConfig = TextChatServiceConstants.CommandConfig
 type CommandContext = TextChatServiceConstants.CommandContext
 type MessagePayload = TextChatServiceConstants.MessagePayload
@@ -114,6 +116,9 @@ function TextChatService:Init(serviceBag)
 	self._registeredTags = {} :: { [string]: ChatTagConfig }
 	self._playerTagsByUserId = {} :: { [number]: { string } }
 	self._commands = {} :: { [string]: CommandRecord }
+	self._chatEligibilityByViewerUserId = {} :: { [number]: ChatEligibilitySnapshot }
+	self._chatEligibilityTrackingMaid = nil
+	self._chatEligibilityTrackingConfig = nil :: ChatEligibilityTrackingConfig?
 
 	self.MessageReceived = createSignal<MessagePayload>()
 	self.MessageSent = createSignal<MessagePayload>()
@@ -124,6 +129,7 @@ function TextChatService:Init(serviceBag)
 	self.PlayerTagsChanged = createSignal<Player, { string }>()
 	self.CommandExecuted = createSignal<CommandContext>()
 	self.ChatPermissionChanged = createSignal<Player, PermissionResult>()
+	self.ChatEligibilitySnapshotChanged = createSignal<Player, ChatEligibilitySnapshot>()
 
 	self._maid:GiveTask(self.MessageReceived)
 	self._maid:GiveTask(self.MessageSent)
@@ -134,6 +140,7 @@ function TextChatService:Init(serviceBag)
 	self._maid:GiveTask(self.PlayerTagsChanged)
 	self._maid:GiveTask(self.CommandExecuted)
 	self._maid:GiveTask(self.ChatPermissionChanged)
+	self._maid:GiveTask(self.ChatEligibilitySnapshotChanged)
 end
 
 function TextChatService:Start()
@@ -142,6 +149,7 @@ function TextChatService:Start()
 
 	self._maid:GiveTask(Players.PlayerRemoving:Connect(function(player)
 		self._playerTagsByUserId[player.UserId] = nil
+		self:_removePlayerFromChatEligibilitySnapshot(player)
 		self:_fireClientEventAll(TextChatServiceConstants.EventNames.PlayerTagsChanged, player.UserId, {})
 	end))
 end
@@ -199,6 +207,8 @@ function TextChatService:_handleClientRequest(player: Player, requestName: strin
 	elseif requestName == requests.GetCanChatWith then
 		local targetUserId = ...
 		return self:_canChatWithUserIdAsync(player, targetUserId)
+	elseif requestName == requests.GetChatEligibilitySnapshot then
+		return self:GetChatEligibilitySnapshot(player)
 	elseif requestName == requests.SendMessage then
 		local channelName = ...
 		return self:_prepareClientMessageAsync(player, channelName)
@@ -341,6 +351,134 @@ function TextChatService:CanUsersDirectChatAsync(fromPlayer: Player, toPlayers: 
 	end
 
 	return resultByPlayer
+end
+
+function TextChatService:StartChatEligibilityTracking(config: ChatEligibilityTrackingConfig?)
+	if self._chatEligibilityTrackingMaid ~= nil then
+		self:StopChatEligibilityTracking()
+	end
+
+	local trackingMaid = Maid.new()
+	self._chatEligibilityTrackingMaid = trackingMaid
+	self._chatEligibilityTrackingConfig = config or {}
+
+	trackingMaid:GiveTask(Players.PlayerAdded:Connect(function(player)
+		local trackingConfig = self._chatEligibilityTrackingConfig
+		if trackingConfig ~= nil and trackingConfig.RefreshOnPlayerAdded == false then
+			return
+		end
+
+		task.spawn(function()
+			self:_refreshChatEligibilityForPlayer(player)
+			for _, otherPlayer in Players:GetPlayers() do
+				if otherPlayer ~= player then
+					self:_refreshChatEligibilityForPlayer(otherPlayer)
+				end
+			end
+		end)
+	end))
+
+	task.spawn(function()
+		self:RefreshChatEligibilitySnapshots()
+	end)
+end
+
+function TextChatService:StopChatEligibilityTracking()
+	if self._chatEligibilityTrackingMaid ~= nil then
+		self._chatEligibilityTrackingMaid:DoCleaning()
+		self._chatEligibilityTrackingMaid = nil
+	end
+
+	self._chatEligibilityTrackingConfig = nil
+	self._chatEligibilityByViewerUserId = {}
+
+	for _, player in Players:GetPlayers() do
+		self.ChatEligibilitySnapshotChanged:Fire(player, {})
+		self:_fireClientEvent(player, TextChatServiceConstants.EventNames.ChatEligibilitySnapshot, {})
+	end
+end
+
+function TextChatService:RefreshChatEligibilitySnapshots()
+	for _, player in Players:GetPlayers() do
+		self:_refreshChatEligibilityForPlayer(player)
+	end
+end
+
+function TextChatService:GetChatEligibilitySnapshot(player: Player): ChatEligibilitySnapshot
+	assert(typeof(player) == "Instance" and player:IsA("Player"), "Bad player")
+
+	local snapshot = self._chatEligibilityByViewerUserId[player.UserId]
+	if snapshot == nil then
+		return {}
+	end
+
+	return self:_cloneChatEligibilitySnapshot(snapshot)
+end
+
+function TextChatService:_refreshChatEligibilityForPlayer(viewer: Player)
+	if self._chatEligibilityTrackingMaid == nil then
+		return
+	end
+
+	if viewer.Parent ~= Players then
+		return
+	end
+
+	local targets = {}
+	for _, target in Players:GetPlayers() do
+		if target ~= viewer then
+			table.insert(targets, target)
+		end
+	end
+
+	local directResults = {}
+	if #targets > 0 then
+		directResults = self:CanUsersDirectChatAsync(viewer, targets)
+	end
+	local snapshot = {}
+	for _, target in targets do
+		local allowed = directResults[target] == true
+		snapshot[target.UserId] = TextChatSharedUtils.normalizePermissionResult(
+			allowed,
+			if allowed then nil else "Users cannot chat"
+		)
+	end
+
+	if viewer.Parent ~= Players or self._chatEligibilityTrackingMaid == nil then
+		return
+	end
+
+	self._chatEligibilityByViewerUserId[viewer.UserId] = snapshot
+	local clonedSnapshot = self:_cloneChatEligibilitySnapshot(snapshot)
+	self.ChatEligibilitySnapshotChanged:Fire(viewer, clonedSnapshot)
+	self:_fireClientEvent(viewer, TextChatServiceConstants.EventNames.ChatEligibilitySnapshot, clonedSnapshot)
+end
+
+function TextChatService:_removePlayerFromChatEligibilitySnapshot(player: Player)
+	self._chatEligibilityByViewerUserId[player.UserId] = nil
+
+	for viewerUserId, snapshot in self._chatEligibilityByViewerUserId do
+		snapshot[player.UserId] = nil
+
+		local viewer = Players:GetPlayerByUserId(viewerUserId)
+		if viewer ~= nil then
+			local clonedSnapshot = self:_cloneChatEligibilitySnapshot(snapshot)
+			self.ChatEligibilitySnapshotChanged:Fire(viewer, clonedSnapshot)
+			self:_fireClientEvent(viewer, TextChatServiceConstants.EventNames.ChatEligibilitySnapshot, clonedSnapshot)
+		end
+	end
+end
+
+function TextChatService:_cloneChatEligibilitySnapshot(snapshot: ChatEligibilitySnapshot): ChatEligibilitySnapshot
+	local clone = {}
+	for userId, result in snapshot do
+		clone[userId] = {
+			Allowed = result.Allowed,
+			Reason = result.Reason,
+		}
+	end
+
+	return clone
 end
 
 function TextChatService:RegisterChannel(config: ChannelConfig): TextChannel

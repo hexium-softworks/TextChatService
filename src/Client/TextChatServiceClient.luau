@@ -16,6 +16,7 @@ local TextChatServiceConstants = require("TextChatServiceConstants")
 local TextChatSharedUtils = require("TextChatSharedUtils")
 
 type ChatTagConfig = TextChatServiceConstants.ChatTagConfig
+type ChatEligibilitySnapshot = TextChatServiceConstants.ChatEligibilitySnapshot
 type MessagePayload = TextChatServiceConstants.MessagePayload
 type PermissionResult = TextChatServiceConstants.PermissionResult
 
@@ -43,6 +44,8 @@ function TextChatServiceClient:Init(serviceBag)
 	self._playerTagsByUserId = {} :: { [number]: { string } }
 	self._canChatCache = nil :: PermissionResult?
 	self._canChatWithCache = {} :: { [number]: PermissionResult }
+	self._chatEligibilitySnapshot = {} :: ChatEligibilitySnapshot
+	self._hasChatEligibilitySnapshot = false
 
 	self.MessageReceived = createSignal<MessagePayload>()
 	self.MessageSent = createSignal<MessagePayload>()
@@ -118,6 +121,13 @@ function TextChatServiceClient:_syncInitialState()
 	if okPlayerTags and typeof(playerTags) == "table" then
 		self._playerTagsByUserId = playerTags
 	end
+
+	local okEligibility, eligibilitySnapshot = pcall(function()
+		return self._requestRemote:InvokeServer(TextChatServiceConstants.Requests.GetChatEligibilitySnapshot)
+	end)
+	if okEligibility and typeof(eligibilitySnapshot) == "table" then
+		self:_setChatEligibilitySnapshot(eligibilitySnapshot)
+	end
 end
 
 function TextChatServiceClient:_messageToPayload(message: TextChatMessage): MessagePayload
@@ -163,7 +173,22 @@ function TextChatServiceClient:_handleServerEvent(eventName: string, ...)
 	elseif eventName == events.CommandExecuted then
 		self.CommandExecuted:Fire(...)
 	elseif eventName == events.ChatPermissionChanged then
-		self.ChatPermissionChanged:Fire(...)
+		local userId, result = ...
+		if type(userId) == "number" and typeof(result) == "table" then
+			local normalized = TextChatSharedUtils.normalizePermissionResult(result.Allowed, result.Reason)
+			self._canChatWithCache[userId] = normalized
+			if self._hasChatEligibilitySnapshot then
+				self._chatEligibilitySnapshot[userId] = normalized
+			end
+			self.ChatPermissionChanged:Fire(userId, normalized)
+		else
+			self.ChatPermissionChanged:Fire(...)
+		end
+	elseif eventName == events.ChatEligibilitySnapshot then
+		local snapshot = ...
+		if typeof(snapshot) == "table" then
+			self:_setChatEligibilitySnapshot(snapshot)
+		end
 	end
 end
 
@@ -319,6 +344,11 @@ function TextChatServiceClient:GetCanChat(): (boolean, string?)
 end
 
 function TextChatServiceClient:GetCanChatWith(userId: number): (boolean, string?)
+	local tracked = self._chatEligibilitySnapshot[userId]
+	if tracked ~= nil then
+		return tracked.Allowed, tracked.Reason
+	end
+
 	local cached = self._canChatWithCache[userId]
 	if cached ~= nil then
 		return cached.Allowed, cached.Reason
@@ -329,6 +359,84 @@ function TextChatServiceClient:GetCanChatWith(userId: number): (boolean, string?
 	self._canChatWithCache[userId] = result
 	self.ChatPermissionChanged:Fire(userId, result)
 	return result.Allowed, result.Reason
+end
+
+function TextChatServiceClient:GetCanChatWithCached(userId: number): (boolean?, string?)
+	local tracked = self._chatEligibilitySnapshot[userId]
+	if tracked ~= nil then
+		return tracked.Allowed, tracked.Reason
+	end
+
+	local cached = self._canChatWithCache[userId]
+	if cached ~= nil then
+		return cached.Allowed, cached.Reason
+	end
+
+	return nil, nil
+end
+
+function TextChatServiceClient:GetChatEligibilitySnapshot(): ChatEligibilitySnapshot
+	return self:_cloneChatEligibilitySnapshot(self._chatEligibilitySnapshot)
+end
+
+function TextChatServiceClient:ObserveChatEligibility(userId: number)
+	local signal = createSignal<PermissionResult?>()
+	local current = self._chatEligibilitySnapshot[userId] or self._canChatWithCache[userId]
+	signal:Fire(if current ~= nil then {
+		Allowed = current.Allowed,
+		Reason = current.Reason,
+	} else nil)
+
+	local connection = self.ChatPermissionChanged:Connect(function(changedUserId, result)
+		if changedUserId == userId then
+			signal:Fire(result)
+		end
+	end)
+
+	local destroy = signal.Destroy
+	function signal:Destroy()
+		connection:Disconnect()
+		destroy(self)
+	end
+
+	return signal
+end
+
+function TextChatServiceClient:_setChatEligibilitySnapshot(snapshot: ChatEligibilitySnapshot)
+	local previous = self._chatEligibilitySnapshot
+	local nextSnapshot = self:_cloneChatEligibilitySnapshot(snapshot)
+	self._chatEligibilitySnapshot = nextSnapshot
+	self._hasChatEligibilitySnapshot = true
+
+	for userId, result in nextSnapshot do
+		self._canChatWithCache[userId] = result
+		local previousResult = previous[userId]
+		if previousResult == nil or previousResult.Allowed ~= result.Allowed or previousResult.Reason ~= result.Reason then
+			self.ChatPermissionChanged:Fire(userId, result)
+		end
+	end
+
+	for userId in previous do
+		if nextSnapshot[userId] == nil then
+			self._canChatWithCache[userId] = nil
+			self.ChatPermissionChanged:Fire(userId, {
+				Allowed = false,
+				Reason = "User is not in this server",
+			})
+		end
+	end
+end
+
+function TextChatServiceClient:_cloneChatEligibilitySnapshot(snapshot: ChatEligibilitySnapshot): ChatEligibilitySnapshot
+	local clone = {}
+	for userId, result in snapshot do
+		clone[userId] = {
+			Allowed = result.Allowed,
+			Reason = result.Reason,
+		}
+	end
+
+	return clone
 end
 
 function TextChatServiceClient:_invokeServer(requestName: string, ...): (boolean, string?)

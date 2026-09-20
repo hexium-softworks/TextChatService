@@ -13,6 +13,12 @@ export type PermissionResult = {
 	Reason: string?,
 }
 
+export type ChatEligibilitySnapshot = { [number]: PermissionResult }
+
+export type ChatEligibilityTrackingConfig = {
+	RefreshOnPlayerAdded: boolean?,
+}
+
 export type ChannelConfig = {
 	Name: string,
 	DisplayName: string?,
@@ -74,10 +80,12 @@ export type TextChatServiceConstants = {
 		PlayerTagsChanged: string,
 		CommandExecuted: string,
 		ChatPermissionChanged: string,
+		ChatEligibilitySnapshot: string,
 	},
 	Requests: {
 		GetCanChat: string,
 		GetCanChatWith: string,
+		GetChatEligibilitySnapshot: string,
 		SendMessage: string,
 		SendDirectMessage: string,
 		GetPlayerTags: string,
@@ -102,11 +110,13 @@ local constants = {
 		PlayerTagsChanged = "PlayerTagsChanged",
 		CommandExecuted = "CommandExecuted",
 		ChatPermissionChanged = "ChatPermissionChanged",
+		ChatEligibilitySnapshot = "ChatEligibilitySnapshot",
 	}),
 
 	Requests = Table.readonly({
 		GetCanChat = "GetCanChat",
 		GetCanChatWith = "GetCanChatWith",
+		GetChatEligibilitySnapshot = "GetChatEligibilitySnapshot",
 		SendMessage = "SendMessage",
 		SendDirectMessage = "SendDirectMessage",
 		GetPlayerTags = "GetPlayerTags",
